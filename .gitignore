@@ -16,3 +16,6 @@ mycam/elf2uf2/
 *.uf2
 pico-sdk/
 pioasm/
+a.txt
+librp2040_arducam.a
+librp2040_arducam_test.a
