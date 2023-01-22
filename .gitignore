@@ -19,3 +19,4 @@ pioasm/
 a.txt
 librp2040_arducam.a
 librp2040_arducam_test.a
+.*.sw?

@@ -67,7 +67,8 @@ namespace {
 enum send_stat {
   ST_INIT,
   ST_SEND,
-  ST_RECD
+  ST_RECD,
+  ST_RSND,
 };
 
 // store transmit request params.
@@ -77,6 +78,7 @@ struct xmit_status {
   uint8_t * dat;
   send_stat stat = ST_INIT;
   uint8_t fid;
+  uint8_t rid;
   size_t len;
   uint8_t count;
   alarm_id_t alarm_id;
@@ -85,6 +87,16 @@ typedef struct xmit_status xmit_status_t;
 
 #define BUFF_SIZE 24
 xmit_status_t stats[BUFF_SIZE];
+uint32_t ack_cnt = 0; // count data received
+uint8_t req_id = 7; // request id
+
+struct ack_status {
+  uint8_t fid;
+  uint8_t rid;
+  bool success;
+};
+typedef struct ack_status ack_status_t;
+
 
 // next available index
 uint8_t get_xmit_st_idx(uint8_t seq){
@@ -101,7 +113,7 @@ uint8_t get_xmit_st_idx(uint8_t seq){
         sqidx = s % BUFF_SIZE;
         if(stats[sqidx].stat == ST_INIT || stats[sqidx].stat == ST_RECD){
             stats[sqidx].stat = ST_INIT;
-            return i;
+            return sqidx;
         }
     }
     return BUFF_SIZE;
@@ -120,6 +132,30 @@ uint8_t find_xmit_st_idx(uint8_t seq){
     return BUFF_SIZE;
 }
 
+uint8_t find_xmit_st_fid(uint8_t fid){
+    for(uint8_t i = 0; i < BUFF_SIZE; i++){
+        if(stats[i].fid == fid){
+            return i;
+        }
+    }
+    return BUFF_SIZE;
+}
+
+uint8_t get_xmit_st_cnt(){
+    uint8_t cnt = 0;
+    for(uint8_t i = 0; i < BUFF_SIZE; i++){
+        if(stats[i].stat == ST_SEND){
+            cnt++;
+        }
+    }
+    return cnt;
+}
+
+bool is_xmit_st_open(){
+    return (get_xmit_st_cnt() > 0);
+}
+
+
 // stores XBee Status Response 0x8B
 struct xmit_response {
   uint8_t fid;
@@ -135,20 +171,43 @@ XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41C17206);
 
 static uint8_t received = 0;
 
-queue_t resp_queue;
-queue_t xmit_queue;
+queue_t hello_ack_queue;
+queue_t xbee_ack_queue;
+queue_t request_ack_queue;
+//queue_t data_ack_queue;
+queue_t done_ack_queue;
 queue_t missing_seq_queue;
 queue_t arducam_cmd_queue;
-uint32_t last_seq = 0;
 
-int64_t add_missing_queue(alarm_id_t id, void *seq) {
+// ------------------
+//   Alarm Handlers
+// ------------------
+
+int64_t hello_timeout(alarm_id_t id, void *user_data) {
+    uint8_t *statp = (uint8_t *)user_data;
+
+    printf("try to add queue from timeout handler...!\n");
+    queue_add_blocking(&hello_ack_queue, statp);
+    printf("done to add queue from timeout handler...!\n");
+
+    // Can return a value here in us to fire in the future
+    return 0;
+}
+
+// application response missing
+int64_t add_missing_queue(alarm_id_t id, void *user_data) {
+    uint8_t *seq = (uint8_t *)user_data;
+
+    printf("add missing_seq_queue %d\n", *seq);
     queue_add_blocking(&missing_seq_queue, seq);
+    printf("add missing_seq_queue done %d\n", *seq);
 
     // Can return a value here in us to fire in the future
     return 0;
 
 }
 
+// xbee response missing
 int64_t xmit_resp_timeout(alarm_id_t id, void *user_data) {
     uint8_t *fidp = (uint8_t *)user_data; // need to check
 
@@ -156,37 +215,45 @@ int64_t xmit_resp_timeout(alarm_id_t id, void *user_data) {
     xmit_resp.fid = *fidp;
     xmit_resp.success = false;
     xmit_resp.timeout = true;
-    queue_add_blocking(&resp_queue, &xmit_resp);
+    queue_add_blocking(&xbee_ack_queue, &xmit_resp);
 
     // Can return a value here in us to fire in the future
     return 0;
 }
 
-int64_t xmit_wreq_timeout(alarm_id_t id, void *user_data) {
-    uint8_t *fidp = (uint8_t *)user_data; // need to check
+// 
+int64_t request_timeout(alarm_id_t id, void *user_data) {
+    ack_status_t *stp = (ack_status_t *)user_data; // need to check
 
-    xmit_response_t xmit_resp;
-    xmit_resp.fid = *fidp;
-    xmit_resp.success = false;
-    xmit_resp.timeout = true;
-    queue_add_blocking(&resp_queue, &xmit_resp);
+    stp->success = false;
+    queue_add_blocking(&request_ack_queue, stp);
 
     // Can return a value here in us to fire in the future
     return 0;
 }
 
-//int64_t xmit_callback(alarm_id_t id, void *user_data) {
-//    xmit_status_t * stat = (xmit_status_t *)user_data;
-//
-//    if(stat->stat == ST_SEND){
-//        uint32_t seq = stat->seq;
-//        // check should use blocking or not.
-//        queue_add_blocking(&xmit_queue, &seq);
-//        return 500;
-//    }
-//    // Can return a value here in us to fire in the future
-//    return 0;
-//}
+int64_t done_timeout(alarm_id_t id, void *user_data) {
+    uint8_t *ridp = (uint8_t *)user_data; // need to check
+
+    queue_add_blocking(&done_ack_queue, ridp);
+
+    // Can return a value here in us to fire in the future
+    return 0;
+}
+
+
+// ------------------
+//  Request Handlers
+// ------------------
+
+void hello_handler(uint8_t tt[]){
+    uint8_t stat;
+
+    printf("try to add queue from hello handler...!\n");
+    stat = 1; // successfully received app ack from server
+    queue_add_blocking(&hello_ack_queue, &stat);
+    printf("done to add queue from hello handler...!\n");
+}
 
 void arducam_cmd_handler(uint8_t tt[]){
     uint8_t cmd;
@@ -196,42 +263,92 @@ void arducam_cmd_handler(uint8_t tt[]){
 }
 
 void write_data_ack_handler(uint8_t tt[]){
+    uint8_t rid;
     uint32_t seq;
 
-    seq = tt[1] << 24;
-    seq |= tt[2] << 16;
-    seq |= tt[3] << 8;
-    seq |= tt[4];
+    rid = tt[1];
+    seq = tt[2] << 24;
+    seq |= tt[3] << 16;
+    seq |= tt[4] << 8;
+    seq |= tt[5];
 
-    printf("write_data_ack_handler: %d : %d\n", seq, last_seq);
+    printf("ack_hndlr: %d %d\n", rid, seq);
 
     int sqidx = find_xmit_st_idx(seq);
     if(sqidx == BUFF_SIZE){
-        // fatal error, should handle properly
+        printf("ack_hndlr: no buffer available for %d:%d\n", rid, seq);
         return;
     }
     stats[sqidx].stat = ST_RECD;
+    ++ack_cnt;
+
+    printf("ack_hndlr: %d %d %d\n", rid, seq, ack_cnt);
+
     if(!cancel_alarm(stats[sqidx].alarm_id)){
     }
 }
+
+void write_data_request_handler(uint8_t tt[]){
+    uint8_t rid;
+    uint32_t len;
+    ack_status_t st;
+
+    rid = tt[1];
+    len = tt[2] << 24;
+    len |= tt[3] << 16;
+    len |= tt[4] << 8;
+    len |= tt[5];
+
+    st.rid = rid;
+    st.success = true;
+    queue_add_blocking(&request_ack_queue, &st);
+}
+
+void write_data_done_handler(uint8_t tt[]){
+    uint8_t rid;
+    uint32_t len;
+    uint32_t seq;
+    ack_status_t st;
+
+    rid = tt[1];
+    len = tt[2] << 24;
+    len |= tt[3] << 16;
+    len |= tt[4] << 8;
+    len |= tt[5];
+    seq = tt[6] << 24;
+    seq |= tt[7] << 16;
+    seq |= tt[8] << 8;
+    seq |= tt[9];
+
+    printf("done_hndlr: %d %d\n", rid, seq);
+
+    st.success = true;
+    st.rid = rid;
+    queue_add_blocking(&done_ack_queue, &st);
+}
+
+
+// ------------------
+//  Common Functions
+// ------------------
 
 bool send_msg(XBeePico& xbee, ZBTxRequest& tx){
     xmit_response_t xmit_resp;
     uint8_t fid = tx.getFrameId();
 
-    printf("before send:%d\n", fid);
+    //printf("before send:%d\n", fid);
     received = 0;
     // add cancel timer for xmit_resp blocking
-    alarm_id_t aid = add_alarm_in_ms(1000, xmit_resp_timeout, &fid, false);
+    alarm_id_t aid = add_alarm_in_ms(200, xmit_resp_timeout, &fid, false);
     xbee.send(tx);
-    printf("after send:%d\n", fid);
+    //printf("after send:%d\n", fid);
 
     for(int i = 0; i < 10; i++){
-        queue_remove_blocking(&resp_queue, &xmit_resp);
+        queue_remove_blocking(&xbee_ack_queue, &xmit_resp);
         if(xmit_resp.fid == fid){
             cancel_alarm(aid);
             if(xmit_resp.success){
-                printf("\nsuccess : %d\n", fid);
+                // printf("\nsuccess : %d\n", fid);
                 return true;
             } else if(xmit_resp.timeout) {
                 printf("\ntimeout : %d\n", fid);
@@ -242,11 +359,15 @@ bool send_msg(XBeePico& xbee, ZBTxRequest& tx){
             }
         } else {
             printf("\nunexpected frame ID : %d : %d\n", fid, xmit_resp.fid);
-            // queue_add_blocking(&resp_queue, &xmit_resp);
+            // queue_add_blocking(&xbee_ack_queue, &xmit_resp);
         }  
     }  
     return false;
 }
+
+// ------------------
+//  Protocol Functions
+// ------------------
 
 bool send_hello(XBeePico& xbee)
 {
@@ -266,20 +387,21 @@ bool send_hello(XBeePico& xbee)
   return res;
 }
 
-bool send_write_request(XBeePico& xbee, uint8_t fid, uint32_t len, uint32_t pkt_cnt){
-    printf("\nstart send_write_request %d:%d\n", len, pkt_cnt);
+bool send_write_request(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t len, uint32_t pkt_cnt){
+    printf("\nstart send_write_request %d:%d:%d:%d\n", fid, rid, len, pkt_cnt);
 
-    uint8_t payload[9];
+    uint8_t payload[10];
 
     payload[0] = CMD_WRITE_REQUEST;
-    payload[1] = (len >> 24) & 0xff;
-    payload[2] = (len >> 16) & 0xff;
-    payload[3] = (len >> 8) & 0xff;
-    payload[4] = len & 0xff;
-    payload[5] = (pkt_cnt >> 24) & 0xff;
-    payload[6] = (pkt_cnt >> 16) & 0xff;
-    payload[7] = (pkt_cnt >> 8) & 0xff;
-    payload[8] = pkt_cnt & 0xff;
+    payload[1] = rid;
+    payload[2] = (len >> 24) & 0xff;
+    payload[3] = (len >> 16) & 0xff;
+    payload[4] = (len >> 8) & 0xff;
+    payload[5] = len & 0xff;
+    payload[6] = (pkt_cnt >> 24) & 0xff;
+    payload[7] = (pkt_cnt >> 16) & 0xff;
+    payload[8] = (pkt_cnt >> 8) & 0xff;
+    payload[9] = pkt_cnt & 0xff;
   
     ZBTxRequest tx = ZBTxRequest(addr, (uint8_t*)payload, sizeof(payload));
 
@@ -287,51 +409,53 @@ bool send_write_request(XBeePico& xbee, uint8_t fid, uint32_t len, uint32_t pkt_
 
     bool res = send_msg(xbee, tx);
 
-    printf("end send_write_request %d:%d:%d\n", len, pkt_cnt, fid);
+    printf("end send_write_request %d:%d:%d:%d\n", fid, rid, len, pkt_cnt);
 
     return res;
 }
 
-bool send_write_data(XBeePico& xbee, uint8_t fid, uint32_t seq, uint8_t* dt, size_t len){
+bool send_write_data(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t seq, uint8_t* dt, size_t len){
 
-    uint8_t payload[len+5];
+    uint8_t payload[len+6];
 
-    printf("\nstart send_write_data [%d][%d][%d]\n", fid, seq, len);
+    printf("\nstart send_write_data [%d][%d][%d][%d]\n", fid, rid, seq, len);
 
     payload[0] = CMD_WRITE_DATA;
-    payload[1] = (seq >> 24) & 0xff;
-    payload[2] = (seq >> 16) & 0xff;
-    payload[3] = (seq >> 8) & 0xff;
-    payload[4] = seq & 0xff;
+    payload[1] = rid;
+    payload[2] = (seq >> 24) & 0xff;
+    payload[3] = (seq >> 16) & 0xff;
+    payload[4] = (seq >> 8) & 0xff;
+    payload[5] = seq & 0xff;
 
-    memcpy(payload + 5, dt, len);
+    memcpy(payload + 6, dt, len);
 
-    ZBTxRequest tx = ZBTxRequest(addr, (uint8_t*)payload, (len + 5));
+    ZBTxRequest tx = ZBTxRequest(addr, (uint8_t*)payload, (len + 6));
     tx.setFrameId(fid);
 
     if(!send_msg(xbee, tx)){
-        //queue_add_blocking(&missing_seq_queue, &seq);
         return false;
     }
 
-    printf("end send_write_data [%d][%d][%d]\n", fid, seq, len);
+    printf("end send_write_data [%d][%d][%d][%d]\n", fid, rid, seq, len);
+
     return true;
 }
 
-void send_write_done(XBeePico& xbee, uint8_t fid, uint32_t len, uint32_t pkt_cnt){
+void send_write_done(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t len, uint32_t pkt_cnt){
     printf("\nstart send_write_done %d %d\n", len, pkt_cnt);
 
-    uint8_t payload[9];
+    uint8_t payload[10];
   
     payload[0] = CMD_WRITE_DONE;
-    payload[1] = (len >> 24) & 0xff;
-    payload[2] = (len >> 16) & 0xff;
-    payload[3] = (len >> 8) & 0xff;
-    payload[4] = len & 0xff;
-    payload[5] = (pkt_cnt >> 24) & 0xff;
-    payload[6] = (pkt_cnt >> 16) & 0xff;
-    payload[7] = (pkt_cnt >> 8) & 0xff;
-    payload[8] = pkt_cnt & 0xff;
+    payload[1] = rid;
+    payload[2] = (len >> 24) & 0xff;
+    payload[3] = (len >> 16) & 0xff;
+    payload[4] = (len >> 8) & 0xff;
+    payload[5] = len & 0xff;
+    payload[6] = (pkt_cnt >> 24) & 0xff;
+    payload[7] = (pkt_cnt >> 16) & 0xff;
+    payload[8] = (pkt_cnt >> 8) & 0xff;
+    payload[9] = pkt_cnt & 0xff;
   
     ZBTxRequest tx = ZBTxRequest(addr, (uint8_t*)payload, sizeof(payload));
     tx.setFrameId(fid);
@@ -340,15 +464,51 @@ void send_write_done(XBeePico& xbee, uint8_t fid, uint32_t len, uint32_t pkt_cnt
     printf("end send_write_done %d\n", fid);
 }
 
+
+// ------------------
+//  
+// ------------------
+void process_missing(XBeePico& xbee){
+    uint32_t mseq;
+    printf("process_missing start\n");
+    while(queue_try_remove(&missing_seq_queue, &mseq)){
+        printf("missing : %d\n", mseq);
+        int msqidx = find_xmit_st_idx(mseq);
+        if(msqidx == BUFF_SIZE){
+            printf("no buff available for missing: %d\n", mseq);
+            continue;
+        }
+        if(stats[msqidx].stat == ST_SEND || stats[msqidx].stat == ST_RSND){
+            uint32_t seq;
+
+            seq = stats[msqidx].seq;
+            stats[msqidx].stat == ST_RSND;
+            stats[msqidx].alarm_id = add_alarm_in_ms(200, add_missing_queue, &stats[msqidx].seq, false);
+            if(!send_write_data(xbee, stats[msqidx].fid, stats[msqidx].rid, stats[msqidx].seq, stats[msqidx].dat, stats[msqidx].len)){
+                queue_add_blocking(&missing_seq_queue, &stats[msqidx].seq);
+                if(!cancel_alarm(stats[msqidx].alarm_id)){
+                    printf("cancel_alarm returns false: %d %d\n", seq, stats[msqidx].alarm_id);
+                }
+            }
+        } else {
+            printf("process_missing ... %d %d\n", stats[msqidx].seq, stats[msqidx].stat);
+        }
+    }
+    printf("process_missing end\n");
+}
+
 void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
     int wrote = 0;
     int seq = 0;
 
     printf("\nstart send_picture_by_xbee %d\n", len);
 
-    size_t hdr_size = 5;
+    size_t hdr_size = 6;
     size_t data_size = DATA_SIZE - hdr_size;
     int pkt_cnt = 0;
+
+    // init Data Ack Counter
+    ack_cnt = 0;
 
     if((len % data_size) > 0){
         pkt_cnt = (int)(len / data_size) + 1;
@@ -356,22 +516,49 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
         pkt_cnt = (int)(len / data_size);
     }
 
-    uint8_t fid = xbee.getNextFrameId();
-    alarm_id_t aid = add_alarm_in_ms(1000, xmit_wreq_timeout, &fid, false);
-    bool res = send_write_request(xbee, fid, len, pkt_cnt);
+    uint8_t fid, rid;
+    alarm_id_t aid;
+    ack_status_t st;
+    bool res;
+    st.success = false;
+    while(!st.success) {
+        fid = xbee.getNextFrameId();
+        rid = req_id++;
+        st.fid = fid;
+        st.rid = rid;
+        aid = add_alarm_in_ms(200, request_timeout, &st, false);
+        if(!send_write_request(xbee, fid, rid, len, pkt_cnt)){
+            if(!cancel_alarm(aid)){
+                printf("cancel write request timeout 1! [%d]\n", aid);
+            }
+            continue;
+        }
+
+        // wait response from server to get ready to receive data.
+        queue_remove_blocking(&request_ack_queue, &st);
+        if(st.success){
+            if(!cancel_alarm(aid)){
+                printf("cancel write request timeout 2! [%d]\n", aid);
+            }
+        }
+    }
 
     uint32_t mseq;
     uint8_t * b = buff;
     int l = len;
     size_t s = 0;
     for(int seq = 0; seq < pkt_cnt; seq++){
-        //int sqidx = seq % BUFF_SIZE;
-        int sqidx = get_xmit_st_idx(seq);
+        int sqidx = BUFF_SIZE;
+        while(1){
+            sqidx = get_xmit_st_idx(seq);
 
-        if(sqidx == BUFF_SIZE){
-            printf(".");
-            sleep_ms(100);
-            continue;
+            if(sqidx == BUFF_SIZE){
+                process_missing(xbee);
+                printf(".");
+                sleep_ms(100);
+            } else {
+                break;
+            }
         }
 
         s = min(l, data_size);
@@ -381,41 +568,46 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
         stats[sqidx].len = s;
         stats[sqidx].dat = b;
         stats[sqidx].fid = fid;
+        stats[sqidx].rid = rid;
         stats[sqidx].stat = ST_SEND;
+        stats[sqidx].alarm_id = add_alarm_in_ms(200, add_missing_queue, &stats[sqidx].seq, false);
 
-        stats[sqidx].alarm_id = add_alarm_in_ms(1000, add_missing_queue, &s, false);
-        if(!send_write_data(xbee, fid, seq, b, s)){
-            queue_add_blocking(&missing_seq_queue, &s);
+        if(!send_write_data(xbee, fid, rid, seq, b, s)){
             if(!cancel_alarm(stats[sqidx].alarm_id)){
+                printf("cancel_alarm returns false: %d %d\n", seq, stats[sqidx].alarm_id);
             }
+            queue_add_blocking(&missing_seq_queue, &seq);
         }
 
-        while(queue_try_remove(&missing_seq_queue, &mseq)){
-            printf("missing send_picture_by_xbee : %d\n", mseq);
-            int msqidx = find_xmit_st_idx(mseq);
-            if(msqidx == BUFF_SIZE){
-                // fatal error
-                continue;
-            }
-            if(stats[msqidx].stat == ST_SEND){
-                res = send_write_data(xbee, stats[msqidx].fid, stats[msqidx].seq, stats[msqidx].dat, stats[msqidx].len);
-            }
-        }
+        process_missing(xbee);
 
         b = b + s;
         l = l - s;
     }
+    process_missing(xbee);
+
     fid = xbee.getNextFrameId();
-    send_write_done(xbee, fid, len, pkt_cnt);
+    st.fid = fid;
+    st.success = false;
+    alarm_id_t done_aid = add_alarm_in_ms(200, done_timeout, &st, false);
+    send_write_done(xbee, fid, rid, len, pkt_cnt);
+
+    queue_remove_blocking(&done_ack_queue, &st);
+    if(!cancel_alarm(done_aid)){
+    }
 
     printf("end send_picture_by_xbee\n");
 }
 
+// ----------------------------
+//  Callback Function for XBee
+// ----------------------------
+
 void func(XBeeResponse& resp, uintptr_t ptr){
     gpio_put(LED_PIN, 0);
-    printf("+===+\n");
-    printf("rcvd:api=0x%02x:avail=%d:isErr=%d:ecode=%d!\n",
-            resp.getApiId(), resp.isAvailable(), resp.isError(), resp.getErrorCode());
+    //printf("+===+\n");
+    //printf("rcvd:api=0x%02x:avail=%d:isErr=%d:ecode=%d!\n",
+    //        resp.getApiId(), resp.isAvailable(), resp.isError(), resp.getErrorCode());
     received = 1;
 
     switch(resp.getApiId()){
@@ -432,10 +624,10 @@ void func(XBeeResponse& resp, uintptr_t ptr){
             xmit_resp.discovery_stat = stat.getDiscoveryStatus();
             xmit_resp.success = stat.isSuccess();
 
-            printf("stat:fid=%d:retry=%d:dlvry=%d:dscvry=%d:sucs=%d\n",
-                    stat.getFrameId(), stat.getTxRetryCount(), stat.getDeliveryStatus(), stat.getDiscoveryStatus(), stat.isSuccess());
+            //printf("stat:fid=%d:retry=%d:dlvry=%d:dscvry=%d:sucs=%d\n",
+            //        stat.getFrameId(), stat.getTxRetryCount(), stat.getDeliveryStatus(), stat.getDiscoveryStatus(), stat.isSuccess());
             uint8_t fid = stat.getFrameId();
-            queue_add_blocking(&resp_queue, &xmit_resp);
+            queue_add_blocking(&xbee_ack_queue, &xmit_resp);
             break;
         }
         case ZBExplicitRxResponse::API_ID: {
@@ -446,18 +638,23 @@ void func(XBeeResponse& resp, uintptr_t ptr){
             uint8_t tt[MAX_FRAME_DATA_SIZE];
             memcpy(tt, rx.getData(), rx.getDataLength());
             tt[rx.getDataLength()] = 0;
-            printf("data:%d:%d:%s\n", rx.getDataLength(), tt[0], (tt + 1));
+            // printf("data:%d:%d:%s\n", rx.getDataLength(), tt[0], (tt + 1));
             switch(tt[0]){
+                case CMD_HELLO: // 0x01
+                    hello_handler(tt);
+                    break;
                 case CMD_CONFIG: // 0x11
                     break;
                 case CMD_RECV_STAT: // 0x12
                     break;
                 case CMD_WRITE_REQUEST_ACK: // 0x13
+                    write_data_request_handler(tt);
                     break;
                 case CMD_WRITE_DATA_ACK: // 0x14
                     write_data_ack_handler(tt);
                     break;
                 case CMD_WRITE_DONE_ACK: // 0x15
+                    write_data_done_handler(tt);
                     break;
                 case CMD_WRITE_RESEND: // 0x16
                     break;
@@ -470,7 +667,7 @@ void func(XBeeResponse& resp, uintptr_t ptr){
             break;
         }
     }
-    printf("-===-\n\n");
+    //printf("-===-\n\n");
     stdio_flush();
 }
 
@@ -503,8 +700,13 @@ int main()
 
   stdio_init_all();
 
-  queue_init(&resp_queue, sizeof(xmit_response), 24);
-  queue_init(&xmit_queue, sizeof(uint32_t), 24);
+  printf("after stdio_init_all!");
+
+  queue_init(&hello_ack_queue, sizeof(uint8_t), 24);
+  queue_init(&xbee_ack_queue, sizeof(xmit_response), 24);
+  queue_init(&request_ack_queue, sizeof(ack_status_t), 8);
+ // queue_init(&data_ack_queue, sizeof(uint32_t), 24);
+  queue_init(&done_ack_queue, sizeof(ack_status_t), 8);
   queue_init(&missing_seq_queue, sizeof(uint32_t), 24);
   queue_init(&arducam_cmd_queue, sizeof(uint8_t), 8);
 
@@ -602,9 +804,23 @@ int main()
   sleep_ms(1000);
   myCAM.clear_fifo_flag();
 
-  if(!send_hello(xbee)){
-    return 1;
+  alarm_id_t hello_alarm_id;
+  uint8_t hello_fid = 2;
+  printf("start hello!\n");
+  while(hello_fid != 1){ // hello_fid becomes 1 if it can receive message from server.
+      printf("start hello timeout...\n");
+      hello_fid = 2; // 2:failed 1:success
+      hello_alarm_id = add_alarm_in_ms(1000, hello_timeout, &hello_fid, false);
+      printf("hello timeout id %d!\n", hello_alarm_id);
+      send_hello(xbee);
+      queue_remove_blocking(&hello_ack_queue, &hello_fid);
+      printf("remove hello_ack_queue %d\n", hello_fid);
+      if(hello_fid == 1){
+        if(!cancel_alarm(hello_alarm_id)){
+        }
+      }
   }
+  printf("end hello!\n");
 
   while (1) 
   {
@@ -612,7 +828,6 @@ int main()
     uint8_t cameraCommand_last = 0;
     uint8_t is_header = 0;
     
-    sleep_ms(5000);
 
     //if(SerialUSBAvailable())
     if(true)
@@ -809,6 +1024,7 @@ int main()
           //Clear the capture done flag
           myCAM.clear_fifo_flag();
           printf("burst to xbee end\n");
+          sleep_ms(5000);
         }
       }
     }
