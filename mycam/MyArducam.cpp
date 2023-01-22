@@ -157,7 +157,7 @@ bool is_xmit_st_open(){
 
 
 // stores XBee Status Response 0x8B
-struct xmit_response {
+struct xbee_response {
   uint8_t fid;
   uint8_t retry_cnt;
   uint8_t delivery_stat;
@@ -165,7 +165,7 @@ struct xmit_response {
   bool success;
   bool timeout;
 };
-typedef struct xmit_response xmit_response_t;
+typedef struct xbee_response xbee_response_t;
 
 XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41C17206);
 
@@ -208,14 +208,14 @@ int64_t add_missing_queue(alarm_id_t id, void *user_data) {
 }
 
 // xbee response missing
-int64_t xmit_resp_timeout(alarm_id_t id, void *user_data) {
+int64_t xbee_resp_timeout(alarm_id_t id, void *user_data) {
     uint8_t *fidp = (uint8_t *)user_data; // need to check
 
-    xmit_response_t xmit_resp;
-    xmit_resp.fid = *fidp;
-    xmit_resp.success = false;
-    xmit_resp.timeout = true;
-    queue_add_blocking(&xbee_ack_queue, &xmit_resp);
+    xbee_response_t xbee_resp;
+    xbee_resp.fid = *fidp;
+    xbee_resp.success = false;
+    xbee_resp.timeout = true;
+    queue_add_blocking(&xbee_ack_queue, &xbee_resp);
 
     // Can return a value here in us to fire in the future
     return 0;
@@ -333,24 +333,24 @@ void write_data_done_handler(uint8_t tt[]){
 // ------------------
 
 bool send_msg(XBeePico& xbee, ZBTxRequest& tx){
-    xmit_response_t xmit_resp;
+    xbee_response_t xbee_resp;
     uint8_t fid = tx.getFrameId();
 
     //printf("before send:%d\n", fid);
     received = 0;
-    // add cancel timer for xmit_resp blocking
-    alarm_id_t aid = add_alarm_in_ms(200, xmit_resp_timeout, &fid, false);
+    // add cancel timer for xbee_resp blocking
+    alarm_id_t aid = add_alarm_in_ms(200, xbee_resp_timeout, &fid, false);
     xbee.send(tx);
     //printf("after send:%d\n", fid);
 
     for(int i = 0; i < 10; i++){
-        queue_remove_blocking(&xbee_ack_queue, &xmit_resp);
-        if(xmit_resp.fid == fid){
+        queue_remove_blocking(&xbee_ack_queue, &xbee_resp);
+        if(xbee_resp.fid == fid){
             cancel_alarm(aid);
-            if(xmit_resp.success){
+            if(xbee_resp.success){
                 // printf("\nsuccess : %d\n", fid);
                 return true;
-            } else if(xmit_resp.timeout) {
+            } else if(xbee_resp.timeout) {
                 printf("\ntimeout : %d\n", fid);
                 return false;
             } else {
@@ -358,8 +358,8 @@ bool send_msg(XBeePico& xbee, ZBTxRequest& tx){
                 return false;
             }
         } else {
-            printf("\nunexpected frame ID : %d : %d\n", fid, xmit_resp.fid);
-            // queue_add_blocking(&xbee_ack_queue, &xmit_resp);
+            printf("\nunexpected frame ID : %d : %d\n", fid, xbee_resp.fid);
+            // queue_add_blocking(&xbee_ack_queue, &xbee_resp);
         }  
     }  
     return false;
@@ -615,19 +615,19 @@ void func(XBeeResponse& resp, uintptr_t ptr){
             // Extended Transmit Status - 0x8B
             // https://www.digi.com/resources/documentation/Digidocs/90001480/reference/r_frame_0x8b.htm?TocPath=API%20frames%7C_____11
             ZBTxStatusResponse stat;
-            xmit_response_t xmit_resp;
+            xbee_response_t xbee_resp;
             resp.getZBTxStatusResponse(stat);
 
-            xmit_resp.fid = stat.getFrameId();
-            xmit_resp.retry_cnt = stat.getTxRetryCount();
-            xmit_resp.delivery_stat = stat.getDeliveryStatus();
-            xmit_resp.discovery_stat = stat.getDiscoveryStatus();
-            xmit_resp.success = stat.isSuccess();
+            xbee_resp.fid = stat.getFrameId();
+            xbee_resp.retry_cnt = stat.getTxRetryCount();
+            xbee_resp.delivery_stat = stat.getDeliveryStatus();
+            xbee_resp.discovery_stat = stat.getDiscoveryStatus();
+            xbee_resp.success = stat.isSuccess();
 
             //printf("stat:fid=%d:retry=%d:dlvry=%d:dscvry=%d:sucs=%d\n",
             //        stat.getFrameId(), stat.getTxRetryCount(), stat.getDeliveryStatus(), stat.getDiscoveryStatus(), stat.isSuccess());
             uint8_t fid = stat.getFrameId();
-            queue_add_blocking(&xbee_ack_queue, &xmit_resp);
+            queue_add_blocking(&xbee_ack_queue, &xbee_resp);
             break;
         }
         case ZBExplicitRxResponse::API_ID: {
@@ -703,9 +703,8 @@ int main()
   printf("after stdio_init_all!");
 
   queue_init(&hello_ack_queue, sizeof(uint8_t), 24);
-  queue_init(&xbee_ack_queue, sizeof(xmit_response), 24);
+  queue_init(&xbee_ack_queue, sizeof(xbee_response), 24);
   queue_init(&request_ack_queue, sizeof(ack_status_t), 8);
- // queue_init(&data_ack_queue, sizeof(uint32_t), 24);
   queue_init(&done_ack_queue, sizeof(ack_status_t), 8);
   queue_init(&missing_seq_queue, sizeof(uint32_t), 24);
   queue_init(&arducam_cmd_queue, sizeof(uint8_t), 8);
