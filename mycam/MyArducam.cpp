@@ -174,7 +174,6 @@ static uint8_t received = 0;
 queue_t hello_ack_queue;
 queue_t xbee_ack_queue;
 queue_t request_ack_queue;
-//queue_t data_ack_queue;
 queue_t done_ack_queue;
 queue_t missing_seq_queue;
 queue_t arducam_cmd_queue;
@@ -186,9 +185,9 @@ queue_t arducam_cmd_queue;
 int64_t hello_timeout(alarm_id_t id, void *user_data) {
     uint8_t *statp = (uint8_t *)user_data;
 
-    printf("try to add queue from timeout handler...!\n");
+    // printf("try to add queue from timeout handler...!\n");
     queue_add_blocking(&hello_ack_queue, statp);
-    printf("done to add queue from timeout handler...!\n");
+    // printf("done to add queue from timeout handler...!\n");
 
     // Can return a value here in us to fire in the future
     return 0;
@@ -198,7 +197,7 @@ int64_t hello_timeout(alarm_id_t id, void *user_data) {
 int64_t add_missing_queue(alarm_id_t id, void *user_data) {
     uint8_t *seq = (uint8_t *)user_data;
 
-    printf("add missing_seq_queue %d\n", *seq);
+    // printf("add missing_seq_queue %d\n", *seq);
     queue_add_blocking(&missing_seq_queue, seq);
     printf("add missing_seq_queue done %d\n", *seq);
 
@@ -409,7 +408,7 @@ bool send_write_request(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t len, 
 
     bool res = send_msg(xbee, tx);
 
-    printf("end send_write_request %d:%d:%d:%d\n", fid, rid, len, pkt_cnt);
+    //printf("end send_write_request %d:%d:%d:%d\n", fid, rid, len, pkt_cnt);
 
     return res;
 }
@@ -436,7 +435,7 @@ bool send_write_data(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t seq, uin
         return false;
     }
 
-    printf("end send_write_data [%d][%d][%d][%d]\n", fid, rid, seq, len);
+    //printf("end send_write_data [%d][%d][%d][%d]\n", fid, rid, seq, len);
 
     return true;
 }
@@ -470,11 +469,12 @@ void send_write_done(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t len, uin
 // ------------------
 void process_missing(XBeePico& xbee){
     uint32_t mseq;
-    printf("process_missing start\n");
+    //printf("process_missing start\n");
     while(queue_try_remove(&missing_seq_queue, &mseq)){
         printf("missing : %d\n", mseq);
         int msqidx = find_xmit_st_idx(mseq);
         if(msqidx == BUFF_SIZE){
+            queue_add_blocking(&missing_seq_queue, &mseq);
             printf("no buff available for missing: %d\n", mseq);
             continue;
         }
@@ -494,7 +494,7 @@ void process_missing(XBeePico& xbee){
             printf("process_missing ... %d %d\n", stats[msqidx].seq, stats[msqidx].stat);
         }
     }
-    printf("process_missing end\n");
+    //printf("process_missing end\n");
 }
 
 void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
@@ -549,6 +549,7 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
     size_t s = 0;
     for(int seq = 0; seq < pkt_cnt; seq++){
         int sqidx = BUFF_SIZE;
+        uint8_t sqidx_cnt = 0;
         while(1){
             sqidx = get_xmit_st_idx(seq);
 
@@ -556,6 +557,9 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
                 process_missing(xbee);
                 printf(".");
                 sleep_ms(100);
+                if(sqidx_cnt++ > 100){
+                    return;
+                }
             } else {
                 break;
             }
