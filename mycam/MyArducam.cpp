@@ -144,7 +144,7 @@ uint8_t find_xmit_st_fid(uint8_t fid){
 uint8_t get_xmit_st_cnt(){
     uint8_t cnt = 0;
     for(uint8_t i = 0; i < BUFF_SIZE; i++){
-        if(stats[i].stat == ST_SEND){
+        if(stats[i].stat == ST_SEND || stats[i].stat == ST_RSND){
             cnt++;
         }
     }
@@ -185,11 +185,11 @@ queue_t arducam_cmd_queue;
 int64_t hello_timeout(alarm_id_t id, void *user_data) {
     uint8_t *statp = (uint8_t *)user_data;
 
-    // printf("try to add queue from timeout handler...!\n");
-    queue_add_blocking(&hello_ack_queue, statp);
-    // printf("done to add queue from timeout handler...!\n");
+    if(!queue_try_add(&hello_ack_queue, statp)){
+      printf("fail to add user data in the hello_ack_queue %d\n", *statp);
+      return 200;
+    }
 
-    // Can return a value here in us to fire in the future
     return 0;
 }
 
@@ -197,13 +197,12 @@ int64_t hello_timeout(alarm_id_t id, void *user_data) {
 int64_t add_missing_queue(alarm_id_t id, void *user_data) {
     uint8_t *seq = (uint8_t *)user_data;
 
-    // printf("add missing_seq_queue %d\n", *seq);
-    queue_add_blocking(&missing_seq_queue, seq);
-    printf("add missing_seq_queue done %d\n", *seq);
+    if(!queue_try_add(&missing_seq_queue, seq)){
+      printf("fail to add user data in the missing_seq_queue %d\n", *seq);
+      return 200;
+    }
 
-    // Can return a value here in us to fire in the future
     return 0;
-
 }
 
 // xbee response missing
@@ -214,9 +213,11 @@ int64_t xbee_resp_timeout(alarm_id_t id, void *user_data) {
     xbee_resp.fid = *fidp;
     xbee_resp.success = false;
     xbee_resp.timeout = true;
-    queue_add_blocking(&xbee_ack_queue, &xbee_resp);
+    if(!queue_try_add(&xbee_ack_queue, &xbee_resp)){
+      printf("fail to add user data in the xbee_ack_queue %d\n", *fidp);
+      return 200;
+    }
 
-    // Can return a value here in us to fire in the future
     return 0;
 }
 
@@ -225,18 +226,22 @@ int64_t request_timeout(alarm_id_t id, void *user_data) {
     ack_status_t *stp = (ack_status_t *)user_data; // need to check
 
     stp->success = false;
-    queue_add_blocking(&request_ack_queue, stp);
+    if(!queue_try_add(&request_ack_queue, stp)){
+      printf("fail to add user data in the xbee_ack_queue %d:%d\n", stp->fid, stp->rid);
+      return 200;
+    }
 
-    // Can return a value here in us to fire in the future
     return 0;
 }
 
 int64_t done_timeout(alarm_id_t id, void *user_data) {
     uint8_t *ridp = (uint8_t *)user_data; // need to check
 
-    queue_add_blocking(&done_ack_queue, ridp);
+    if(!queue_try_add(&done_ack_queue, ridp)){
+      printf("fail to add user data in the xbee_ack_queue %d\n", *ridp);
+      return 200;
+    }
 
-    // Can return a value here in us to fire in the future
     return 0;
 }
 
