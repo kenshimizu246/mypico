@@ -87,7 +87,6 @@ typedef struct xmit_status xmit_status_t;
 
 #define BUFF_SIZE 24
 xmit_status_t stats[BUFF_SIZE];
-uint32_t ack_cnt = 0; // count data received
 uint8_t req_id = 7; // request id
 
 struct ack_status {
@@ -288,9 +287,8 @@ void write_data_ack_handler(uint8_t tt[]){
         return;
     }
     stats[sqidx].stat = ST_RECD;
-    ++ack_cnt;
 
-    printf("ack_hndlr: %d %d %d\n", rid, seq, ack_cnt);
+    printf("ack_hndlr: %d %d\n", rid, seq);
 
     if(!cancel_alarm(stats[sqidx].alarm_id)){
         printf("ack_hndlr: cancel alarm error for %d:%d\n", rid, seq);
@@ -521,9 +519,6 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
     size_t hdr_size = 6;
     size_t data_size = DATA_SIZE - hdr_size;
     int pkt_cnt = 0;
-
-    // init Data Ack Counter
-    ack_cnt = 0;
 
     if((len % data_size) > 0){
         pkt_cnt = (int)(len / data_size) + 1;
