@@ -279,7 +279,10 @@ void write_data_ack_handler(uint8_t tt[]){
     seq |= tt[4] << 8;
     seq |= tt[5];
 
-    printf("ack_hndlr: %d %d\n", rid, seq);
+    printf("ack_hndlr: %d %d %d\n", rid, req_id, seq);
+    if(rid != req_id){
+        return;
+    }
 
     int sqidx = find_xmit_st_idx(seq);
     if(sqidx == BUFF_SIZE){
