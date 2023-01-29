@@ -255,7 +255,9 @@ void hello_handler(uint8_t tt[]){
 
     printf("try to add queue from hello handler...!\n");
     stat = 1; // successfully received app ack from server
-    queue_add_blocking(&hello_ack_queue, &stat);
+    if(!queue_try_add(&hello_ack_queue, &stat)){
+        printf("add queue error for hello_ack_queue...!\n");
+    }
     printf("done to add queue from hello handler...!\n");
 }
 
@@ -263,7 +265,9 @@ void arducam_cmd_handler(uint8_t tt[]){
     uint8_t cmd;
 
     cmd = tt[1];
-    queue_add_blocking(&arducam_cmd_queue, &cmd);
+    if(!queue_try_add(&arducam_cmd_queue, &cmd)){
+        printf("add queue error for arducam_cmd_queue...!\n");
+    }
 }
 
 void write_data_ack_handler(uint8_t tt[]){
@@ -289,6 +293,7 @@ void write_data_ack_handler(uint8_t tt[]){
     printf("ack_hndlr: %d %d %d\n", rid, seq, ack_cnt);
 
     if(!cancel_alarm(stats[sqidx].alarm_id)){
+        printf("ack_hndlr: cancel alarm error for %d:%d\n", rid, seq);
     }
 }
 
@@ -305,7 +310,9 @@ void write_data_request_handler(uint8_t tt[]){
 
     st.rid = rid;
     st.success = true;
-    queue_add_blocking(&request_ack_queue, &st);
+    if(!queue_try_add(&request_ack_queue, &st)){
+        printf("data_req_hndlr: adding queue error for %d:%d\n", rid, len);
+    }
 }
 
 void write_data_done_handler(uint8_t tt[]){
@@ -328,7 +335,10 @@ void write_data_done_handler(uint8_t tt[]){
 
     st.success = true;
     st.rid = rid;
-    queue_add_blocking(&done_ack_queue, &st);
+  
+    if(!queue_try_add(&done_ack_queue, &st)){
+        printf("done_hndlr: adding queue error for %d\n", rid);
+    }
 }
 
 
