@@ -4,6 +4,7 @@
 #include "pico/platform.h"
 #include "pico/stdlib.h"
 #include "pico/mutex.h"
+#include "pico/lock_core.h"
 //#include "pico/multicore.h"
 #include "pico/util/queue.h"
 
@@ -86,8 +87,9 @@ struct xmit_status {
 typedef struct xmit_status xmit_status_t;
 
 #define BUFF_SIZE 24
-xmit_status_t stats[BUFF_SIZE];
-uint8_t req_id = 7; // request id
+static xmit_status_t stats[BUFF_SIZE];
+static uint8_t req_id = 7; // request id
+static bool req_done = false; // request status
 
 struct ack_status {
   uint8_t fid;
@@ -96,6 +98,12 @@ struct ack_status {
 };
 typedef struct ack_status ack_status_t;
 
+static mutex_t xbee_send_mutex;
+static XBeePico xbee = XBeePico();
+
+
+
+int64_t add_missing_queue(alarm_id_t id, void *user_data);
 
 // next available index
 uint8_t get_xmit_st_idx(uint8_t seq){
@@ -168,14 +176,15 @@ typedef struct xbee_response xbee_response_t;
 
 XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41C17206);
 
-static uint8_t received = 0;
-
 queue_t hello_ack_queue;
 queue_t xbee_ack_queue;
 queue_t request_ack_queue;
 queue_t done_ack_queue;
+queue_t complete_queue;
 queue_t missing_seq_queue;
 queue_t arducam_cmd_queue;
+
+
 
 // ------------------
 //   Alarm Handlers
@@ -244,6 +253,17 @@ int64_t done_timeout(alarm_id_t id, void *user_data) {
     return 0;
 }
 
+int64_t complete_timeout(alarm_id_t id, void *user_data) {
+    uint8_t *ridp = (uint8_t *)user_data;
+
+    if(!queue_try_add(&complete_queue, ridp)){
+      printf("fail to add user data in the complete_queue %d\n", *ridp);
+      return 200;
+    }
+
+    return 0;
+}
+
 
 // ------------------
 //  Request Handlers
@@ -290,6 +310,13 @@ void write_data_ack_handler(uint8_t tt[]){
         return;
     }
     stats[sqidx].stat = ST_RECD;
+
+    if(req_done && !is_xmit_st_open()){
+        // send done message.
+        if(!queue_try_add(&complete_queue, &rid)){
+            printf("ack_hndlr: cannot add queue for %d:%d\n", rid, seq);
+        }
+    }
 
     printf("ack_hndlr: %d %d\n", rid, seq);
 
@@ -350,34 +377,43 @@ void write_data_done_handler(uint8_t tt[]){
 bool send_msg(XBeePico& xbee, ZBTxRequest& tx){
     xbee_response_t xbee_resp;
     uint8_t fid = tx.getFrameId();
+    uint32_t owner;
 
     //printf("before send:%d\n", fid);
-    received = 0;
+    if(!mutex_try_enter(&xbee_send_mutex, &owner)){
+        if(owner == get_core_num()) return false;
+        mutex_enter_blocking(&xbee_send_mutex);
+    }
     // add cancel timer for xbee_resp blocking
     alarm_id_t aid = add_alarm_in_ms(200, xbee_resp_timeout, &fid, false);
     xbee.send(tx);
     //printf("after send:%d\n", fid);
 
+    bool res = false;
     for(int i = 0; i < 10; i++){
         queue_remove_blocking(&xbee_ack_queue, &xbee_resp);
         if(xbee_resp.fid == fid){
             cancel_alarm(aid);
             if(xbee_resp.success){
                 // printf("\nsuccess : %d\n", fid);
-                return true;
+                res = true;
+                break;
             } else if(xbee_resp.timeout) {
                 printf("\ntimeout : %d\n", fid);
-                return false;
+                res = false;
+                break;
             } else {
                 printf("\nunexpected : %d\n", fid);
-                return false;
+                res = false;
+                break;
             }
         } else {
             printf("\nunexpected frame ID : %d : %d\n", fid, xbee_resp.fid);
             // queue_add_blocking(&xbee_ack_queue, &xbee_resp);
         }  
-    }  
-    return false;
+    }
+    mutex_exit(&xbee_send_mutex);
+    return res;
 }
 
 // ------------------
@@ -480,39 +516,6 @@ void send_write_done(XBeePico& xbee, uint8_t fid, uint8_t rid, uint32_t len, uin
 }
 
 
-// ------------------
-//  
-// ------------------
-void process_missing(XBeePico& xbee){
-    uint32_t mseq;
-    //printf("process_missing start\n");
-    while(queue_try_remove(&missing_seq_queue, &mseq)){
-        printf("missing : %d\n", mseq);
-        int msqidx = find_xmit_st_idx(mseq);
-        if(msqidx == BUFF_SIZE){
-            queue_add_blocking(&missing_seq_queue, &mseq);
-            printf("no buff available for missing: %d\n", mseq);
-            continue;
-        }
-        if(stats[msqidx].stat == ST_SEND || stats[msqidx].stat == ST_RSND){
-            uint32_t seq;
-
-            seq = stats[msqidx].seq;
-            stats[msqidx].stat == ST_RSND;
-            stats[msqidx].alarm_id = add_alarm_in_ms(200, add_missing_queue, &stats[msqidx].seq, false);
-            if(!send_write_data(xbee, stats[msqidx].fid, stats[msqidx].rid, stats[msqidx].seq, stats[msqidx].dat, stats[msqidx].len)){
-                queue_add_blocking(&missing_seq_queue, &stats[msqidx].seq);
-                if(!cancel_alarm(stats[msqidx].alarm_id)){
-                    printf("cancel_alarm returns false: %d %d\n", seq, stats[msqidx].alarm_id);
-                }
-            }
-        } else {
-            printf("process_missing ... %d %d\n", stats[msqidx].seq, stats[msqidx].stat);
-        }
-    }
-    //printf("process_missing end\n");
-}
-
 void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
     int wrote = 0;
     int seq = 0;
@@ -529,14 +532,15 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
         pkt_cnt = (int)(len / data_size);
     }
 
-    uint8_t fid, rid;
+    uint8_t fid, rid, rr;
     alarm_id_t aid;
     ack_status_t st;
     bool res;
     st.success = false;
+    req_done = false;
     while(!st.success) {
         fid = xbee.getNextFrameId();
-        rid = req_id++;
+        rid = ++req_id;
         st.fid = fid;
         st.rid = rid;
         aid = add_alarm_in_ms(200, request_timeout, &st, false);
@@ -567,7 +571,6 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
             sqidx = get_xmit_st_idx(seq);
 
             if(sqidx == BUFF_SIZE){
-                process_missing(xbee);
                 printf(".");
                 sleep_ms(100);
                 if(sqidx_cnt++ > 100){
@@ -595,14 +598,13 @@ void send_picture_by_xbee(XBeePico& xbee, uint8_t * buff, const int len){
             }
             queue_add_blocking(&missing_seq_queue, &seq);
         }
-
-        process_missing(xbee);
-
         b = b + s;
         l = l - s;
     }
-    process_missing(xbee);
-
+    req_done = true;
+    aid = add_alarm_in_ms(200, complete_timeout, &rid, false);
+    queue_remove_blocking(&complete_queue, &rr);
+    
     fid = xbee.getNextFrameId();
     st.fid = fid;
     st.success = false;
@@ -625,7 +627,6 @@ void func(XBeeResponse& resp, uintptr_t ptr){
     //printf("+===+\n");
     //printf("rcvd:api=0x%02x:avail=%d:isErr=%d:ecode=%d!\n",
     //        resp.getApiId(), resp.isAvailable(), resp.isError(), resp.getErrorCode());
-    received = 1;
 
     switch(resp.getApiId()){
         case ZBTxStatusResponse::API_ID: {
@@ -699,6 +700,35 @@ uint8_t bmp_header[BMPIMAGEOFFSET] =
   0x00, 0x00
 };
 
+// ------------------
+//   Multi Core1
+// ------------------
+
+void core1_entry(){
+    uint32_t seq, mseq;
+    while(1){
+        queue_remove_blocking(&missing_seq_queue, &mseq);
+        int msqidx = find_xmit_st_idx(mseq);
+        if(msqidx == BUFF_SIZE){
+            printf("no buff available for missing: %d\n", mseq);
+            continue;
+        }
+        if(stats[msqidx].stat == ST_SEND || stats[msqidx].stat == ST_RSND){
+            seq = stats[msqidx].seq;
+            stats[msqidx].stat == ST_RSND;
+            stats[msqidx].alarm_id = add_alarm_in_ms(200, add_missing_queue, &stats[msqidx].seq, false);
+            if(!send_write_data(xbee, stats[msqidx].fid, stats[msqidx].rid, stats[msqidx].seq, stats[msqidx].dat, stats[msqidx].len)){
+                queue_add_blocking(&missing_seq_queue, &stats[msqidx].seq);
+                if(!cancel_alarm(stats[msqidx].alarm_id)){
+                    printf("cancel_alarm returns false: %d %d\n", seq, stats[msqidx].alarm_id);
+                }
+            }
+        } else {
+            printf("process_missing ... %d %d\n", stats[msqidx].seq, stats[msqidx].stat);
+        }
+    }
+}
+
 // set pin 10 as the slave select for the digital pot:
 const uint8_t CS = 5;
 bool is_header = false;
@@ -723,6 +753,7 @@ int main()
   queue_init(&xbee_ack_queue, sizeof(xbee_response), 24);
   queue_init(&request_ack_queue, sizeof(ack_status_t), 8);
   queue_init(&done_ack_queue, sizeof(ack_status_t), 8);
+  queue_init(&complete_queue, sizeof(uint8_t), 8);
   queue_init(&missing_seq_queue, sizeof(uint32_t), 24);
   queue_init(&arducam_cmd_queue, sizeof(uint8_t), 8);
 
@@ -762,10 +793,10 @@ int main()
   // Get information about the memory area to use for the model's input.
   input = interpreter->input(0);
 
-
   gpio_put(LED_PIN, 1);
 
-  XBeePico xbee = XBeePico();
+  mutex_init(&xbee_send_mutex);
+
   xbee.onResponse(func);
 
   xbee.start();
