@@ -37,6 +37,7 @@ target_link_libraries(mycam
         rp2040_arducam
 	pico_stdlib
         pico_sync
+        pico_multicore
 	hardware_dma
 	hardware_i2c
 	hardware_pwm

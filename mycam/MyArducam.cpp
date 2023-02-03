@@ -5,7 +5,7 @@
 #include "pico/stdlib.h"
 #include "pico/mutex.h"
 #include "pico/lock_core.h"
-//#include "pico/multicore.h"
+#include "pico/multicore.h"
 #include "pico/util/queue.h"
 
 #include "hardware/dma.h"
@@ -850,6 +850,8 @@ int main()
   //myCAM.OV2640_set_JPEG_size(OV2640_160x120);
   sleep_ms(1000);
   myCAM.clear_fifo_flag();
+
+  multicore_launch_core1(core1_entry);
 
   alarm_id_t hello_alarm_id;
   uint8_t hello_fid = 2;
