@@ -162,13 +162,9 @@ bool is_xmit_st_open(){
     return (get_xmit_st_cnt() > 0);
 }
 
-
 // stores XBee Status Response 0x8B
 struct xbee_response {
   uint8_t fid;
-  uint8_t retry_cnt;
-  uint8_t delivery_stat;
-  uint8_t discovery_stat;
   bool success;
   bool timeout;
 };
@@ -637,9 +633,6 @@ void func(XBeeResponse& resp, uintptr_t ptr){
             resp.getZBTxStatusResponse(stat);
 
             xbee_resp.fid = stat.getFrameId();
-            xbee_resp.retry_cnt = stat.getTxRetryCount();
-            xbee_resp.delivery_stat = stat.getDeliveryStatus();
-            xbee_resp.discovery_stat = stat.getDiscoveryStatus();
             xbee_resp.success = stat.isSuccess();
 
             //printf("stat:fid=%d:retry=%d:dlvry=%d:dscvry=%d:sucs=%d\n",
