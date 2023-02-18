@@ -1,0 +1,279 @@
+
+static mutex_t xbee_send_mutex;
+
+    // mutex の取得を試みる。成功するとtrueを返し、失敗するとfalseを返します。
+    // owner パラメータには、失敗したときに現在のmutexのownerがコピーされます。
+    if(!mutex_try_enter(&xbee_send_mutex, &owner)){
+        if(owner == get_core_num()) return false;
+        mutex_enter_blocking(&xbee_send_mutex);
+    }
+
+    /*** do something ***/
+
+    // mutex を開放します。
+    mutex_exit(&xbee_send_mutex);
+
+================================================================================
+From pico/mutex_t.h
+
+typedef struct __packed_aligned mutex {
+    lock_core_t core;
+    lock_owner_id_t owner;      //! owner id LOCK_INVALID_OWNER_ID for unowned
+} mutex_t;
+
+================================================================================
+From pico_sync/mutex.c
+
+bool __time_critical_func(mutex_try_enter)(mutex_t *mtx, uint32_t *owner_out) {
+#if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
+    if (mtx->recursive) {
+        return recursive_mutex_try_enter(mtx, owner_out);
+    }
+#endif
+    bool entered;
+    uint32_t save = spin_lock_blocking(mtx->core.spin_lock);
+    if (!lock_is_owner_id_valid(mtx->owner)) {
+        mtx->owner = lock_get_caller_owner_id();
+        entered = true;
+    } else {
+        if (owner_out) *owner_out = (uint32_t) mtx->owner;
+        entered = false;
+    }
+    spin_unlock(mtx->core.spin_lock, save);
+    return entered;
+}
+
+void __time_critical_func(mutex_enter_blocking)(mutex_t *mtx) {
+#if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
+    if (mtx->recursive) {
+        recursive_mutex_enter_blocking(mtx);
+        return;
+    }
+#endif
+    lock_owner_id_t caller = lock_get_caller_owner_id();
+    do {
+        uint32_t save = spin_lock_blocking(mtx->core.spin_lock);
+        if (!lock_is_owner_id_valid(mtx->owner)) {
+            mtx->owner = caller;
+            spin_unlock(mtx->core.spin_lock, save);
+            break;
+        }
+        lock_internal_spin_unlock_with_wait(&mtx->core, save);
+    } while (true);
+}
+
+void __time_critical_func(mutex_exit)(mutex_t *mtx) {
+#if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
+    if (mtx->recursive) {
+        recursive_mutex_exit(mtx);
+        return;
+    }
+#endif
+    uint32_t save = spin_lock_blocking(mtx->core.spin_lock);
+    assert(lock_is_owner_id_valid(mtx->owner));
+    mtx->owner = LOCK_INVALID_OWNER_ID;
+    lock_internal_spin_unlock_with_notify(&mtx->core, save);
+}
+
+================================================================================
+From pico/lock_core.h
+
+/** \file lock_core.h
+ *  \ingroup lock_core
+ *
+ * Base implementation for locking primitives protected by a spin lock. The spin lock is only used to protect
+ * access to the remaining lock state (in primitives using lock_core); it is never left locked outside
+ * of the function implementations
+ */
+struct lock_core {
+    // spin lock protecting this lock's state
+    spin_lock_t *spin_lock;
+
+    // note any lock members in containing structures need not be volatile;
+    // they are protected by memory/compiler barriers when gaining and release spin locks
+};
+
+typedef struct lock_core lock_core_t;
+
+#ifndef lock_owner_id_t
+/*! \brief  type to use to store the 'owner' of a lock.
+ *  \ingroup lock_core
+ * By default this is int8_t as it only needs to store the core number or -1, however it may be
+ * overridden if a larger type is required (e.g. for an RTOS task id)
+ */
+#define lock_owner_id_t int8_t
+#endif
+
+#ifndef LOCK_INVALID_OWNER_ID
+/*! \brief  marker value to use for a lock_owner_id_t which does not refer to any valid owner
+ *  \ingroup lock_core
+ */
+#define LOCK_INVALID_OWNER_ID ((lock_owner_id_t)-1)
+#endif
+
+#ifndef lock_get_caller_owner_id
+/*! \brief  return the owner id for the caller
+ *  \ingroup lock_core
+ * By default this returns the calling core number, but may be overridden (e.g. to return an RTOS task id)
+ */
+#define lock_get_caller_owner_id() ((lock_owner_id_t)get_core_num())
+#ifndef lock_is_owner_id_valid
+#define lock_is_owner_id_valid(id) ((id)>=0)
+#endif
+#endif
+
+
+================================================================================
+From pico/lock_core.h
+
+#ifndef lock_internal_spin_unlock_with_wait
+/*! \brief   Atomically unlock the lock's spin lock, and wait for a notification.
+ *  \ingroup lock_core
+ *
+ * _Atomic_ here refers to the fact that it should not be possible for a concurrent lock_internal_spin_unlock_with_notify
+ * to insert itself between the spin unlock and this wait in a way that the wait does not see the notification (i.e. causing
+ * a missed notification). In other words this method should always wake up in response to a lock_internal_spin_unlock_with_notify
+ * for the same lock, which completes after this call starts.
+ *
+ * In an ideal implementation, this method would return exactly after the corresponding lock_internal_spin_unlock_with_notify
+ * has subsequently been called on the same lock instance, however this method is free to return at _any_ point before that;
+ * this macro is _always_ used in a loop which locks the spin lock, checks the internal locking primitive state and then
+ * waits again if the calling thread should not proceed.
+ *
+ * By default this macro simply unlocks the spin lock, and then performs a WFE, but may be overridden
+ * (e.g. to actually block the RTOS task).
+ *
+ * \param lock the lock_core for the primitive which needs to block
+ * \param save the uint32_t value that should be passed to spin_unlock when the spin lock is unlocked. (i.e. the `PRIMASK`
+ *             state when the spin lock was acquire
+ */
+#define lock_internal_spin_unlock_with_wait(lock, save) spin_unlock((lock)->spin_lock, save), __wfe()
+#endif
+
+#ifndef lock_internal_spin_unlock_with_notify
+/*! \brief   Atomically unlock the lock's spin lock, and send a notification
+ *  \ingroup lock_core
+ *
+ * _Atomic_ here refers to the fact that it should not be possible for this notification to happen during a
+ * lock_internal_spin_unlock_with_wait in a way that that wait does not see the notification (i.e. causing
+ * a missed notification). In other words this method should always wake up any lock_internal_spin_unlock_with_wait
+ * which started before this call completes.
+ *
+ * In an ideal implementation, this method would wake up only the corresponding lock_internal_spin_unlock_with_wait
+ * that has been called on the same lock instance, however it is free to wake up any of them, as they will check
+ * their condition and then re-wait if necessary/
+ *
+ * By default this macro simply unlocks the spin lock, and then performs a SEV, but may be overridden
+ * (e.g. to actually un-block RTOS task(s)).
+ *
+ * \param lock the lock_core for the primitive which needs to block
+ * \param save the uint32_t value that should be passed to spin_unlock when the spin lock is unlocked. (i.e. the PRIMASK
+ *             state when the spin lock was acquire)
+ */
+#define lock_internal_spin_unlock_with_notify(lock, save) spin_unlock((lock)->spin_lock, save), __sev()
+#endif
+
+================================================================================
+From hardware/sync.h
+
+/*! \brief Acquire a spin lock safely
+ *  \ingroup hardware_sync
+ *
+ * This function will disable interrupts prior to acquiring the spinlock
+ *
+ * \param lock Spinlock instance
+ * \return interrupt status to be used when unlocking, to restore to original state
+ */
+__force_inline static uint32_t spin_lock_blocking(spin_lock_t *lock) {
+    uint32_t save = save_and_disable_interrupts();
+    spin_lock_unsafe_blocking(lock);
+    return save;
+}
+
+/*! \brief Release a spin lock safely
+ *  \ingroup hardware_sync
+ *
+ * This function will re-enable interrupts according to the parameters.
+ *
+ * \param lock Spinlock instance
+ * \param saved_irq Return value from the \ref spin_lock_blocking() function.
+ * \return interrupt status to be used when unlocking, to restore to original state
+ *
+ * \sa spin_lock_blocking()
+ */
+__force_inline static void spin_unlock(spin_lock_t *lock, uint32_t saved_irq) {
+    spin_unlock_unsafe(lock);
+    restore_interrupts(saved_irq);
+}
+
+/*! \brief Acquire a spin lock without disabling interrupts (hence unsafe)
+ *  \ingroup hardware_sync
+ *
+ * \param lock Spinlock instance
+ */
+__force_inline static void spin_lock_unsafe_blocking(spin_lock_t *lock) {
+    // Note we don't do a wfe or anything, because by convention these spin_locks are VERY SHORT LIVED and NEVER BLOCK and run
+    // with INTERRUPTS disabled (to ensure that)... therefore nothing on our core could be blocking us, so we just need to wait on another core
+    // anyway which should be finished soon
+    while (__builtin_expect(!*lock, 0));
+    __mem_fence_acquire();
+}
+
+/*! \brief Save and disable interrupts
+ *  \ingroup hardware_sync
+ *
+ * \return The prior interrupt enable status for restoration later via restore_interrupts()
+ */
+__force_inline static uint32_t save_and_disable_interrupts(void) {
+    uint32_t status;
+    __asm volatile ("mrs %0, PRIMASK" : "=r" (status)::);
+    __asm volatile ("cpsid i");
+    return status;
+}
+
+================================================================================
+// Arm Documentation
+__builtin_expect
+https://developer.arm.com/documentation/dui0348/a/CIAHBHDH
+
+This intrinsic provides the compiler with branch prediction information. Calling __builtin_expect(expr, , c) informs the compiler that it is expected that expr == c.
+
+Note
+This builtin function is a GNU compiler extension that is supported by the ARM compiler.
+
+====================================================
+hardware/sync.h
+
+/*! \brief Acquire a memory fence
+ *  \ingroup hardware_sync
+ */
+__force_inline static void __mem_fence_acquire(void) {
+    // the original code below makes it hard for us to be included from C++ via a header
+    // which itself is in an extern "C", so just use __dmb instead, which is what
+    // is required on Cortex M0+
+    __dmb();
+//#ifndef __cplusplus
+//    atomic_thread_fence(memory_order_acquire);
+//#else
+//    std::atomic_thread_fence(std::memory_order_acquire);
+//#endif
+}
+
+/*! \brief Insert a DMB instruction in to the code path.
+ *  \ingroup hardware_sync
+ *
+ * The DMB (data memory barrier) acts as a memory barrier, all memory accesses prior to this
+ * instruction will be observed before any explicit access after the instruction.
+ */
+__force_inline static void __dmb(void) {
+    __asm volatile ("dmb" : : : "memory");
+}
+
+
+
+
+
+
+
+
+
