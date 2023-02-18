@@ -1,4 +1,4 @@
-
+```c
 static mutex_t xbee_send_mutex;
 
     // mutex の取得を試みる。成功するとtrueを返し、失敗するとfalseを返します。
@@ -12,18 +12,20 @@ static mutex_t xbee_send_mutex;
 
     // mutex を開放します。
     mutex_exit(&xbee_send_mutex);
+```
 
-================================================================================
 From pico/mutex_t.h
 
+```c
 typedef struct __packed_aligned mutex {
     lock_core_t core;
     lock_owner_id_t owner;      //! owner id LOCK_INVALID_OWNER_ID for unowned
 } mutex_t;
+```
 
-================================================================================
 From pico_sync/mutex.c
 
+```c
 bool __time_critical_func(mutex_try_enter)(mutex_t *mtx, uint32_t *owner_out) {
 #if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
     if (mtx->recursive) {
@@ -42,7 +44,10 @@ bool __time_critical_func(mutex_try_enter)(mutex_t *mtx, uint32_t *owner_out) {
     spin_unlock(mtx->core.spin_lock, save);
     return entered;
 }
+```
 
+
+```c
 void __time_critical_func(mutex_enter_blocking)(mutex_t *mtx) {
 #if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
     if (mtx->recursive) {
@@ -61,7 +66,9 @@ void __time_critical_func(mutex_enter_blocking)(mutex_t *mtx) {
         lock_internal_spin_unlock_with_wait(&mtx->core, save);
     } while (true);
 }
+```
 
+```c
 void __time_critical_func(mutex_exit)(mutex_t *mtx) {
 #if PICO_MUTEX_ENABLE_SDK120_COMPATIBILITY
     if (mtx->recursive) {
@@ -74,10 +81,10 @@ void __time_critical_func(mutex_exit)(mutex_t *mtx) {
     mtx->owner = LOCK_INVALID_OWNER_ID;
     lock_internal_spin_unlock_with_notify(&mtx->core, save);
 }
+```
 
-================================================================================
 From pico/lock_core.h
-
+```c
 /** \file lock_core.h
  *  \ingroup lock_core
  *
@@ -94,7 +101,9 @@ struct lock_core {
 };
 
 typedef struct lock_core lock_core_t;
+```
 
+```c
 #ifndef lock_owner_id_t
 /*! \brief  type to use to store the 'owner' of a lock.
  *  \ingroup lock_core
@@ -103,14 +112,18 @@ typedef struct lock_core lock_core_t;
  */
 #define lock_owner_id_t int8_t
 #endif
+```
 
+```c
 #ifndef LOCK_INVALID_OWNER_ID
 /*! \brief  marker value to use for a lock_owner_id_t which does not refer to any valid owner
  *  \ingroup lock_core
  */
 #define LOCK_INVALID_OWNER_ID ((lock_owner_id_t)-1)
 #endif
+```
 
+```c
 #ifndef lock_get_caller_owner_id
 /*! \brief  return the owner id for the caller
  *  \ingroup lock_core
@@ -121,11 +134,11 @@ typedef struct lock_core lock_core_t;
 #define lock_is_owner_id_valid(id) ((id)>=0)
 #endif
 #endif
+```
 
 
-================================================================================
 From pico/lock_core.h
-
+```c
 #ifndef lock_internal_spin_unlock_with_wait
 /*! \brief   Atomically unlock the lock's spin lock, and wait for a notification.
  *  \ingroup lock_core
@@ -149,7 +162,9 @@ From pico/lock_core.h
  */
 #define lock_internal_spin_unlock_with_wait(lock, save) spin_unlock((lock)->spin_lock, save), __wfe()
 #endif
+```
 
+```c
 #ifndef lock_internal_spin_unlock_with_notify
 /*! \brief   Atomically unlock the lock's spin lock, and send a notification
  *  \ingroup lock_core
@@ -172,10 +187,10 @@ From pico/lock_core.h
  */
 #define lock_internal_spin_unlock_with_notify(lock, save) spin_unlock((lock)->spin_lock, save), __sev()
 #endif
+```
 
-================================================================================
 From hardware/sync.h
-
+```c
 /*! \brief Acquire a spin lock safely
  *  \ingroup hardware_sync
  *
@@ -189,7 +204,9 @@ __force_inline static uint32_t spin_lock_blocking(spin_lock_t *lock) {
     spin_lock_unsafe_blocking(lock);
     return save;
 }
+```
 
+```c
 /*! \brief Release a spin lock safely
  *  \ingroup hardware_sync
  *
@@ -205,7 +222,9 @@ __force_inline static void spin_unlock(spin_lock_t *lock, uint32_t saved_irq) {
     spin_unlock_unsafe(lock);
     restore_interrupts(saved_irq);
 }
+```
 
+```c
 /*! \brief Acquire a spin lock without disabling interrupts (hence unsafe)
  *  \ingroup hardware_sync
  *
@@ -218,7 +237,9 @@ __force_inline static void spin_lock_unsafe_blocking(spin_lock_t *lock) {
     while (__builtin_expect(!*lock, 0));
     __mem_fence_acquire();
 }
+```
 
+```c
 /*! \brief Save and disable interrupts
  *  \ingroup hardware_sync
  *
@@ -230,8 +251,8 @@ __force_inline static uint32_t save_and_disable_interrupts(void) {
     __asm volatile ("cpsid i");
     return status;
 }
+```
 
-================================================================================
 // Arm Documentation
 __builtin_expect
 https://developer.arm.com/documentation/dui0348/a/CIAHBHDH
@@ -241,9 +262,10 @@ This intrinsic provides the compiler with branch prediction information. Calling
 Note
 This builtin function is a GNU compiler extension that is supported by the ARM compiler.
 
-====================================================
-hardware/sync.h
 
+
+hardware/sync.h
+```c
 /*! \brief Acquire a memory fence
  *  \ingroup hardware_sync
  */
@@ -258,7 +280,9 @@ __force_inline static void __mem_fence_acquire(void) {
 //    std::atomic_thread_fence(std::memory_order_acquire);
 //#endif
 }
+```
 
+```c
 /*! \brief Insert a DMB instruction in to the code path.
  *  \ingroup hardware_sync
  *
@@ -268,6 +292,7 @@ __force_inline static void __mem_fence_acquire(void) {
 __force_inline static void __dmb(void) {
     __asm volatile ("dmb" : : : "memory");
 }
+```
 
 
 
