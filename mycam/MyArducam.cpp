@@ -36,7 +36,14 @@
 #define min(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
+// GP25 -> LED
+// GP22/29 -> RED
+// GP21/27 -> YELLOW
+// GP20/26 -> GREEN
 #define LED_PIN 25
+#define RED_PIN 22
+#define YELLOW_PIN 21
+#define GREEN_PIN 20
 
 #define CMD_HELLO 0x01
 #define CMD_WRITE_REQUEST 0x02
@@ -52,6 +59,9 @@
 #define CMD_ARDUCAM_CMD 0x17
 
 #define DATA_SIZE 80
+
+uint8_t AT_CMD_DH[2] = {'D','H'};
+uint8_t AT_CMD_DL[2] = {'D','L'};
 
 namespace {
     tflite::ErrorReporter    *error_reporter = nullptr;
@@ -170,7 +180,8 @@ struct xbee_response {
 };
 typedef struct xbee_response xbee_response_t;
 
-XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41C17206);
+XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41CC4764);
+//XBeeAddress64 addr = XBeeAddress64(0x0013A200, 0x41C17206);
 
 queue_t hello_ack_queue;
 queue_t xbee_ack_queue;
@@ -683,6 +694,24 @@ void func(XBeeResponse& resp, uintptr_t ptr){
 }
 
 
+void funcAt(AtCommandResponse& resp, uintptr_t ptr){
+//    if(!resp.isOk()){
+//        // error
+//        return;
+//    }
+//    if(resp.getValueLength() != 4){
+//        // error
+//        return;
+//    }
+//    uint32_t* vv = (uint32_t*)resp.getValue();
+//    if(memcmp(resp.getCommand(), AT_CMD_DH, 2) == 0){
+//        addr.setMsb(*vv);
+//    } else if(memcmp(resp.getCommand(), AT_CMD_DL, 2) == 0){
+//        addr.setLsb(*vv);
+//    }
+}
+
+
 #define BMPIMAGEOFFSET 66
 uint8_t bmp_header[BMPIMAGEOFFSET] =
 {
@@ -751,7 +780,26 @@ int main()
   queue_init(&arducam_cmd_queue, sizeof(uint8_t), 8);
 
   gpio_init(LED_PIN);
+  gpio_init(RED_PIN);
+  gpio_init(YELLOW_PIN);
+  gpio_init(GREEN_PIN);
+
   gpio_set_dir(LED_PIN, GPIO_OUT);
+  gpio_set_dir(RED_PIN, GPIO_OUT);
+  gpio_set_dir(YELLOW_PIN, GPIO_OUT);
+  gpio_set_dir(GREEN_PIN, GPIO_OUT);
+
+  gpio_put(LED_PIN, 1);
+  gpio_put(RED_PIN, 1);
+  gpio_put(YELLOW_PIN, 1);
+  gpio_put(GREEN_PIN, 1);
+
+  sleep_ms(500);
+
+  gpio_put(LED_PIN, 0);
+  gpio_put(RED_PIN, 0);
+  gpio_put(YELLOW_PIN, 1);
+  gpio_put(GREEN_PIN, 0);
 
   static tflite::MicroErrorReporter micro_error_reporter;
   error_reporter = &micro_error_reporter;
@@ -762,6 +810,7 @@ int main()
                          "Model provided is schema version %d not equal "
                          "to supported version %d.",
                          model->version(), TFLITE_SCHEMA_VERSION);
+    gpio_put(RED_PIN, 1);
     return -1;
   }
 
@@ -780,6 +829,7 @@ int main()
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
   if (allocate_status != kTfLiteOk) {
     TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensors() failed");
+    gpio_put(RED_PIN, 1);
     return -2;
   }
 
@@ -792,11 +842,28 @@ int main()
 
   xbee.onResponse(func);
 
+//  xbee.onAtCommandResponse(funcAt);
+
   xbee.start();
 
   sleep_ms(100);
 
-  gpio_put(LED_PIN, 0);
+  // need to read DH Destination Address High and DL Destination Address Low 
+  // then create address.
+  // #define AT_COMMAND_REQUEST 0x08
+  // #define AT_COMMAND_QUEUE_REQUEST 0x09
+  // #define REMOTE_AT_REQUEST 0x17
+  // #define AT_RESPONSE 0x88
+  // #define AT_COMMAND_RESPONSE 0x88
+  // #define REMOTE_AT_COMMAND_RESPONSE 0x97
+  // AtCommandRequest(uint8_t *command);
+  // AtCommandRequest(uint8_t *command, uint8_t *commandValue, uint8_t commandValueLength);
+  // class AtCommandResponse : public FrameIdResponse {
+//  uint8_t atcmd = AT_COMMAND_REQUEST;
+//  AtCommandRequest atreq_h = AtCommandRequest(&atcmd, AT_CMD_DH, 2);
+//  AtCommandRequest atreq_l = AtCommandRequest(&atcmd, AT_CMD_DL, 2);
+//  xbee.send(atreq_h);
+//  xbee.send(atreq_l);
 
   // put your setup code here, to run once:
   myCAM.Arducam_init();
@@ -849,12 +916,15 @@ int main()
   alarm_id_t hello_alarm_id;
   uint8_t hello_fid = 2;
   printf("start hello!\n");
+  gpio_put(YELLOW_PIN, 0);
   while(hello_fid != 1){ // hello_fid becomes 1 if it can receive message from server.
+      gpio_put(YELLOW_PIN, 1);
       printf("start hello timeout...\n");
       hello_fid = 2; // 2:failed 1:success
       hello_alarm_id = add_alarm_in_ms(1000, hello_timeout, &hello_fid, false);
       printf("hello timeout id %d!\n", hello_alarm_id);
       send_hello(xbee);
+      gpio_put(YELLOW_PIN, 0);
       queue_remove_blocking(&hello_ack_queue, &hello_fid);
       printf("remove hello_ack_queue %d\n", hello_fid);
       if(hello_fid == 1){
@@ -863,12 +933,16 @@ int main()
       }
   }
   printf("end hello!\n");
+  gpio_put(YELLOW_PIN, 0);
 
   while (1) 
   {
     printf("start loop 1\n");
     uint8_t cameraCommand_last = 0;
     uint8_t is_header = 0;
+    gpio_put(YELLOW_PIN, 0);
+    gpio_put(RED_PIN, 0);
+    gpio_put(GREEN_PIN, 0);
     
 
     //if(SerialUSBAvailable())
@@ -1050,23 +1124,31 @@ int main()
       if (start_capture == 1)
       {
         printf("start_capture 1\n");
+        gpio_put(GREEN_PIN, 1);
         myCAM.flush_fifo();
         myCAM.clear_fifo_flag();
         //Start capture
         myCAM.start_capture();
         start_capture = 0;
         printf("end_capture 0\n");
+        gpio_put(GREEN_PIN, 0);
+        gpio_put(YELLOW_PIN, 1);
         sleep_ms(1000);
+        gpio_put(YELLOW_PIN, 0);
 
         if (myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK))
         {
+          gpio_put(GREEN_PIN, 1);
           printf("burst to xbee start\n");
           //read_fifo_burst(myCAM);
           read_fifo_burst_xbee(myCAM, xbee);
           //Clear the capture done flag
           myCAM.clear_fifo_flag();
           printf("burst to xbee end\n");
+          gpio_put(GREEN_PIN, 0);
+          gpio_put(YELLOW_PIN, 1);
           sleep_ms(5000);
+          gpio_put(YELLOW_PIN, 0);
         }
       }
     }
